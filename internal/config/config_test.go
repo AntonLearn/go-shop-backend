@@ -1,123 +1,177 @@
-// Package config_test реализует модульное тестирование подсистемы конфигурации.
-// Используется подход Table-Driven Testing, который является стандартом для Go
-// при тестировании функций с множеством входных параметров и валидацией.
+// Package config_test предоставляет комплексный набор модульных тестов для проверки
+// механизмов инициализации, парсинга и валидации конфигурации приложения.
+// Тестирование организовано по принципу "черного ящика" (black-box testing), обеспечивая
+// проверку исключительно публичного контракта пакета без привязки к деталям реализации.
 package config_test
 
 import (
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/antonlearn/go-shop-backend/internal/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/antonlearn/go-shop-backend/internal/config"
 )
 
-func TestLoadConfig(t *testing.T) {
-	// Мы не используем ручную очистку через os.Unsetenv, так как t.Setenv
-	// гарантирует автоматический откат изменений после завершения теста.
+// setupEnvHelper изолирует окружение каждого теста, предотвращая взаимное влияние
+// параллельных или последовательных запусков через глобальные переменные ОС.
+func setupEnvHelper(t *testing.T, envs map[string]string) {
+	t.Helper()
 
-	type testCase struct {
-		name        string
-		setupEnv    func(t *testing.T)
-		wantErr     bool
-		errContains string
-		validateCfg func(t *testing.T, cfg *config.Config)
+	// Список всех ключевых переменных, используемых пакетом конфигурации
+	targetKeys := []string{
+		"APP_MODE",
+		"JWT_SECRET",
+		"LOG_MODE",
+		"DB_FILE",
+		"APP_PORT",
+		"APP_SHUTDOWN_TIMEOUT",
 	}
 
-	tests := []testCase{
-		{
-			name: "Успешная загрузка с дефолтными значениями (режим local)",
-			setupEnv: func(t *testing.T) {
-				t.Setenv("APP_MODE", "local")
-			},
-			wantErr: false,
-			validateCfg: func(t *testing.T, cfg *config.Config) {
-				assert.Equal(t, "local", cfg.AppMode)
-				assert.Equal(t, "Both", cfg.LogMode)
-				assert.Equal(t, "8080", cfg.HTTP.Port)
-				assert.Equal(t, 5*time.Second, cfg.HTTP.ShutdownTimeout)
-				assert.True(t, strings.HasSuffix(cfg.DB.DBFile, "shop.db"))
-			},
-		},
-		{
-			name: "Успешная загрузка в режиме production с валидным JWT_SECRET",
-			setupEnv: func(t *testing.T) {
-				t.Setenv("APP_MODE", "production")
-				t.Setenv("JWT_SECRET", "super-safe-and-long-secret-key-12345")
-				t.Setenv("APP_PORT", "9090")
-				t.Setenv("LOG_MODE", "Console")
-			},
-			wantErr: false,
-			validateCfg: func(t *testing.T, cfg *config.Config) {
-				assert.Equal(t, "production", cfg.AppMode)
-				assert.Equal(t, "super-safe-and-long-secret-key-12345", cfg.JWTSecret)
-				assert.Equal(t, "9090", cfg.HTTP.Port)
-				assert.Equal(t, "Console", cfg.LogMode)
-			},
-		},
-		{
-			name: "Ошибка: режим production без указания JWT_SECRET",
-			setupEnv: func(t *testing.T) {
-				t.Setenv("APP_MODE", "production")
-				t.Setenv("JWT_SECRET", "")
-			},
-			wantErr:     true,
-			errContains: "требуется уникальный и надежный JWT_SECRET",
-		},
-		{
-			name: "Ошибка: указан неизвестный режим работы приложения (AppMode)",
-			setupEnv: func(t *testing.T) {
-				t.Setenv("APP_MODE", "staging")
-			},
-			wantErr:     true,
-			errContains: "неизвестный режим staging",
-		},
-		{
-			name: "Успешный парсинг кастомного таймаута плавного завершения (ShutdownTimeout)",
-			setupEnv: func(t *testing.T) {
-				t.Setenv("APP_MODE", "local")
-				t.Setenv("APP_SHUTDOWN_TIMEOUT", "15s")
-			},
-			wantErr: false,
-			validateCfg: func(t *testing.T, cfg *config.Config) {
-				assert.Equal(t, 15*time.Second, cfg.HTTP.ShutdownTimeout)
-			},
-		},
-		{
-			name: "Неверный формат таймаута завершения — откат на дефолт",
-			setupEnv: func(t *testing.T) {
-				t.Setenv("APP_MODE", "local")
-				t.Setenv("APP_SHUTDOWN_TIMEOUT", "invalid_duration_string")
-			},
-			wantErr: false,
-			validateCfg: func(t *testing.T, cfg *config.Config) {
-				assert.Equal(t, 5*time.Second, cfg.HTTP.ShutdownTimeout)
-			},
-		},
+	// Сохраняем текущее состояние операционной системы для последующего восстановления
+	backup := make(map[string]string)
+	for _, key := range targetKeys {
+		if val, exists := os.LookupEnv(key); exists {
+			backup[key] = val
+			_ = os.Unsetenv(key)
+		}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Настраиваем окружение
-			tt.setupEnv(t)
+	// Гарантируем очистку текущих и восстановление исходных переменных после завершения теста
+	t.Cleanup(func() {
+		for _, key := range targetKeys {
+			_ = os.Unsetenv(key)
+		}
+		for key, val := range backup {
+			_ = os.Setenv(key, val)
+		}
+	})
 
-			// Выполняем тест
-			cfg, err := config.LoadConfig()
-
-			// Проверяем результат
-			if tt.wantErr {
-				assert.Error(t, err)
-				assert.Nil(t, cfg)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, cfg)
-				if tt.validateCfg != nil {
-					tt.validateCfg(t, cfg)
-				}
-			}
-		})
+	// Устанавливаем новые тестовые значения
+	for key, val := range envs {
+		err := os.Setenv(key, val)
+		require.NoError(t, err, "Не удалось настроить тестовое окружение для переменной: %s", key)
 	}
+}
+
+// TestLoadConfig_OkLocal проверяет успешную инициализацию конфигурации
+// со значениями по умолчанию в локальном режиме работы приложения.
+func TestLoadConfig_OkLocal(t *testing.T) {
+	// Arrange
+	setupEnvHelper(t, map[string]string{
+		"APP_MODE": "local",
+	})
+
+	// Act
+	cfg, err := config.LoadConfig()
+
+	// Assert
+	require.NoError(t, err, "Загрузка конфигурации в режиме 'local' не должна вызывать ошибок")
+	require.NotNil(t, cfg, "Конфигурация не должна быть nil при успешном разборе")
+
+	assert.Equal(t, "local", cfg.AppMode)
+	assert.Equal(t, "8080", cfg.HTTP.Port)
+	assert.Equal(t, 5*time.Second, cfg.HTTP.ShutdownTimeout)
+	assert.Equal(t, "Both", cfg.LogMode)
+	assert.True(t, filepath.IsAbs(cfg.DB.DBFile), "Путь к базе данных должен быть приведен к абсолютному виду")
+	assert.Contains(t, cfg.DB.DBFile, "shop.db")
+}
+
+// TestLoadConfig_OkProd проверяет корректную сборку конфигурации для production-среды
+// при условии, что передан валидный и заполненный секретный ключ JWT.
+func TestLoadConfig_OkProd(t *testing.T) {
+	// Arrange
+	setupEnvHelper(t, map[string]string{
+		"APP_MODE":   "production",
+		"JWT_SECRET": "super_secure_and_very_long_production_secret_key_2026",
+		"APP_PORT":   "443",
+	})
+
+	// Act
+	cfg, err := config.LoadConfig()
+
+	// Assert
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "production", cfg.AppMode)
+	assert.Equal(t, "super_secure_and_very_long_production_secret_key_2026", cfg.JWTSecret)
+	assert.Equal(t, "443", cfg.HTTP.Port)
+}
+
+// TestLoadConfig_ErrProdNoSecret верифицирует критическое требование безопасности:
+// отказ запуска в режиме production, если не задана секретная строка подписи токенов.
+func TestLoadConfig_ErrProdNoSecret(t *testing.T) {
+	// Arrange
+	setupEnvHelper(t, map[string]string{
+		"APP_MODE": "production",
+		// JWT_SECRET намеренно не задается или передается пустым
+		"JWT_SECRET": "",
+	})
+
+	// Act
+	cfg, err := config.LoadConfig()
+
+	// Assert
+	assert.Error(t, err, "Ожидалась ошибка валидации безопасности для production среды")
+	assert.Nil(t, cfg, "Объект конфигурации должен быть nil в случае ошибки валидации")
+	assert.Contains(t, err.Error(), "требуется уникальный и надежный JWT_SECRET")
+}
+
+// TestLoadConfig_ErrInvalidMode проверяет защиту бизнес-логики от некорректных
+// или неподдерживаемых режимов окружения, переданных извне.
+func TestLoadConfig_ErrInvalidMode(t *testing.T) {
+	// Arrange
+	setupEnvHelper(t, map[string]string{
+		"APP_MODE": "staging",
+	})
+
+	// Act
+	cfg, err := config.LoadConfig()
+
+	// Assert
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "неизвестный режим staging")
+}
+
+// TestLoadConfig_TimeoutFallback проверяет отказоустойчивость парсинга временных
+// интервалов: при некорректном формате таймаута система должна применить дефолтное значение.
+func TestLoadConfig_TimeoutFallback(t *testing.T) {
+	// Arrange
+	setupEnvHelper(t, map[string]string{
+		"APP_MODE":             "local",
+		"APP_SHUTDOWN_TIMEOUT": "invalid_duration_string",
+	})
+
+	// Act
+	cfg, err := config.LoadConfig()
+
+	// Assert
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	// Должно восстановиться дефолтное значение (5 секунд), несмотря на ошибку парсинга
+	assert.Equal(t, 5*time.Second, cfg.HTTP.ShutdownTimeout, "Не сработал fallback к значению по умолчанию для таймаута")
+}
+
+// TestLoadConfig_AbsoluteDBPath контролирует логику вычисления путей к инфраструктурным файлам:
+// если передан изначально абсолютный путь к БД, он должен остаться неизменным.
+func TestLoadConfig_AbsoluteDBPath(t *testing.T) {
+	// Arrange
+	targetAbsPath := filepath.Clean(os.TempDir() + string(filepath.Separator) + "custom_production_shop.db")
+
+	setupEnvHelper(t, map[string]string{
+		"APP_MODE": "local",
+		"DB_FILE":  targetAbsPath,
+	})
+
+	// Act
+	cfg, err := config.LoadConfig()
+
+	// Assert
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, targetAbsPath, cfg.DB.DBFile, "Абсолютный путь к базе данных был искажен внутренней логикой")
 }

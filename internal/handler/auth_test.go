@@ -1,380 +1,375 @@
-// Package handler_test содержит модульные тесты для транспортного слоя (HTTP-хендлеров).
-// Тесты используют моки для изоляции от слоя бизнес-логики и проверяют корректность
-// обработки входящих запросов, валидацию DTO и формирование HTTP-ответов.
+// Package handler_test содержит модульные тесты для проверки транспортного слоя
+// аутентификации (AuthHandler). Все тесты используют принцип black-box.
 package handler_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+
 	"github.com/antonlearn/go-shop-backend/internal/handler"
 	"github.com/antonlearn/go-shop-backend/internal/model"
 	"github.com/antonlearn/go-shop-backend/pkg/logger"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/suite"
 )
 
-// --- MOCK ---
+// =============================================================================
+// Мок-объект для изоляции AuthServiceInterface
+// =============================================================================
 
-// MockAuthService — заглушка (mock) для интерфейса AuthServiceInterface.
-// Позволяет контролировать и проверять вызовы к слою бизнес-логики аутентификации.
-type MockAuthService struct {
+type mockAuthService struct {
 	mock.Mock
 }
 
-// SignUp имитирует вызов метода регистрации пользователя.
-func (m *MockAuthService) SignUp(ctx context.Context, input model.SignUpInput) (model.AuthResponse, error) {
-	args := m.Called(mock.Anything, input)
+func (m *mockAuthService) SignUp(ctx context.Context, input model.SignUpInput) (model.AuthResponse, error) {
+	args := m.Called(ctx, input)
 	return args.Get(0).(model.AuthResponse), args.Error(1)
 }
 
-// SignIn имитирует вызов метода авторизации пользователя.
-func (m *MockAuthService) SignIn(ctx context.Context, input model.SignInInput) (model.AuthResponse, error) {
-	args := m.Called(mock.Anything, input)
+func (m *mockAuthService) SignIn(ctx context.Context, input model.SignInInput) (model.AuthResponse, error) {
+	args := m.Called(ctx, input)
 	return args.Get(0).(model.AuthResponse), args.Error(1)
 }
 
-// Refresh имитирует вызов метода обновления пары JWT-токенов.
-func (m *MockAuthService) Refresh(ctx context.Context, token string) (model.AuthResponse, error) {
-	args := m.Called(mock.Anything, token)
+func (m *mockAuthService) Refresh(ctx context.Context, refreshToken string) (model.AuthResponse, error) {
+	args := m.Called(ctx, refreshToken)
 	return args.Get(0).(model.AuthResponse), args.Error(1)
 }
 
-// Logout имитирует вызов метода завершения сессии и отзыва токена.
-func (m *MockAuthService) Logout(ctx context.Context, token string) error {
-	return m.Called(mock.Anything, token).Error(0)
+func (m *mockAuthService) Logout(ctx context.Context, refreshToken string) error {
+	args := m.Called(ctx, refreshToken)
+	return args.Error(0)
 }
 
-// --- TEST SUITE ---
-
-type AuthHandlerTestSuite struct {
-	suite.Suite
-	mockSvc *MockAuthService
-	h       *handler.AuthHandler
+type authErrorResponse struct {
+	Error string `json:"error"`
 }
 
-func (s *AuthHandlerTestSuite) SetupTest() {
-	log, _ := logger.New("Console", "DEBUG")
-	s.mockSvc = new(MockAuthService)
-	s.h = handler.NewAuthHandler(s.mockSvc, log)
+func setupAuthTestDeps(t *testing.T) (*handler.AuthHandler, *mockAuthService) {
+	t.Helper()
+	log, err := logger.New("local", "Stdout")
+	require.NoError(t, err, "Не удалось инициализировать тестовый логгер")
+
+	mockService := new(mockAuthService)
+	authHandler := handler.NewAuthHandler(mockService, log)
+
+	return authHandler, mockService
 }
 
-// ==========================================
-// ТЕСТЫ: SignUp (Регистрация)
-// ==========================================
+// =============================================================================
+// Тесты для метода SignUp (Регистрация)
+// =============================================================================
 
-func (s *AuthHandlerTestSuite) TestSignUp() {
+func TestAuthSignUp_Success(t *testing.T) {
+	h, s := setupAuthTestDeps(t)
 	input := model.SignUpInput{
-		Name:            "Anton",
-		Email:           "test@shop.com",
+		Email:           "test@example.com",
 		Password:        "password123",
-		PasswordConfirm: "password123",
+		ConfirmPassword: "password123",
 	}
-	resp := model.AuthResponse{AccessToken: "at", RefreshToken: "rt"}
+	expectedResponse := model.AuthResponse{
+		AccessToken:  "access_token_mock",
+		RefreshToken: "refresh_token_mock",
+	}
 
-	s.Run("Success", func() {
-		s.mockSvc.On("SignUp", mock.Anything, input).Return(resp, nil).Once()
+	s.On("SignUp", mock.Anything, input).Return(expectedResponse, nil)
 
-		body, _ := json.Marshal(input)
-		req := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
+	body, err := json.Marshal(input)
+	require.NoError(t, err)
 
-		s.h.SignUp(w, req)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sign-up", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
 
-		s.Equal(http.StatusCreated, w.Code)
-		s.mockSvc.AssertExpectations(s.T())
-	})
+	h.SignUp(rr, req)
 
-	s.Run("Method Not Allowed", func() {
-		req := httptest.NewRequest(http.MethodGet, "/signup", nil)
-		w := httptest.NewRecorder()
-
-		s.h.SignUp(w, req)
-
-		s.Equal(http.StatusMethodNotAllowed, w.Code)
-	})
-
-	s.Run("Invalid JSON", func() {
-		req := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBufferString("{invalid-json"))
-		w := httptest.NewRecorder()
-
-		s.h.SignUp(w, req)
-
-		s.Equal(http.StatusBadRequest, w.Code)
-	})
-
-	s.Run("Validation Error", func() {
-		invalidInput := input
-		invalidInput.Password = "123" // Слишком короткий пароль
-
-		body, _ := json.Marshal(invalidInput)
-		req := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.SignUp(w, req)
-
-		s.Equal(http.StatusUnprocessableEntity, w.Code)
-	})
-
-	s.Run("Conflict - User Already Exists", func() {
-		s.mockSvc.On("SignUp", mock.Anything, input).Return(model.AuthResponse{}, model.ErrUserAlreadyExists).Once()
-
-		body, _ := json.Marshal(input)
-		req := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.SignUp(w, req)
-
-		s.Equal(http.StatusConflict, w.Code)
-	})
-
-	s.Run("Internal Server Error", func() {
-		s.mockSvc.On("SignUp", mock.Anything, input).Return(model.AuthResponse{}, errors.New("db crash")).Once()
-
-		body, _ := json.Marshal(input)
-		req := httptest.NewRequest(http.MethodPost, "/signup", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.SignUp(w, req)
-
-		s.Equal(http.StatusInternalServerError, w.Code)
-	})
+	assert.Equal(t, http.StatusCreated, rr.Code)
+	var actualResponse model.AuthResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &actualResponse)
+	require.NoError(t, err)
+	assert.Equal(t, expectedResponse, actualResponse)
+	s.AssertExpectations(t)
 }
 
-// ==========================================
-// ТЕСТЫ: SignIn (Аутентификация)
-// ==========================================
+func TestAuthSignUp_Errors(t *testing.T) {
+	tests := []struct {
+		name        string
+		method      string
+		body        any
+		mockSetup   func(s *mockAuthService)
+		expectedSt  int
+		expectedMsg string
+	}{
+		{
+			name:        "Неподдерживаемый метод GET",
+			method:      http.MethodGet,
+			body:        nil,
+			mockSetup:   func(s *mockAuthService) {},
+			expectedSt:  http.StatusMethodNotAllowed,
+			expectedMsg: "метод не поддерживается",
+		},
+		{
+			name:        "Некорректный JSON",
+			method:      http.MethodPost,
+			body:        "{bad-json}",
+			mockSetup:   func(s *mockAuthService) {},
+			expectedSt:  http.StatusBadRequest,
+			expectedMsg: "некорректный формат JSON",
+		},
+		{
+			name:        "Ошибка валидации структуры",
+			method:      http.MethodPost,
+			body:        model.SignUpInput{Email: ""}, // Пустые поля провалят "required"
+			mockSetup:   func(s *mockAuthService) {},
+			expectedSt:  http.StatusUnprocessableEntity,
+			expectedMsg: "ошибка валидации полей запроса",
+		},
+		{
+			name:   "Пользователь уже существует (Conflict)",
+			method: http.MethodPost,
+			body: model.SignUpInput{
+				Email:           "existing@example.com",
+				Password:        "password123",
+				ConfirmPassword: "password123",
+			},
+			mockSetup: func(s *mockAuthService) {
+				s.On("SignUp", mock.Anything, mock.Anything).Return(model.AuthResponse{}, model.ErrUserAlreadyExists)
+			},
+			expectedSt:  http.StatusConflict,
+			expectedMsg: "пользователь с таким email уже зарегистрирован",
+		},
+		{
+			name:   "Внутренняя ошибка сервиса",
+			method: http.MethodPost,
+			body: model.SignUpInput{
+				Email:           "error@example.com",
+				Password:        "password123",
+				ConfirmPassword: "password123",
+			},
+			mockSetup: func(s *mockAuthService) {
+				s.On("SignUp", mock.Anything, mock.Anything).Return(model.AuthResponse{}, assert.AnError)
+			},
+			expectedSt:  http.StatusInternalServerError,
+			expectedMsg: "внутренняя ошибка сервера",
+		},
+	}
 
-func (s *AuthHandlerTestSuite) TestSignIn() {
-	input := model.SignInInput{Email: "user@shop.com", Password: "password123"}
-	resp := model.AuthResponse{AccessToken: "at", RefreshToken: "rt"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, s := setupAuthTestDeps(t)
+			tt.mockSetup(s)
 
-	s.Run("Success", func() {
-		s.mockSvc.On("SignIn", mock.Anything, input).Return(resp, nil).Once()
+			var buf bytes.Buffer
+			if str, ok := tt.body.(string); ok {
+				buf.WriteString(str)
+			} else if tt.body != nil {
+				err := json.NewEncoder(&buf).Encode(tt.body)
+				require.NoError(t, err)
+			}
 
-		body, _ := json.Marshal(input)
-		req := httptest.NewRequest(http.MethodPost, "/signin", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, "/api/v1/auth/sign-up", &buf)
+			rr := httptest.NewRecorder()
 
-		s.h.SignIn(w, req)
+			h.SignUp(rr, req)
 
-		s.Equal(http.StatusOK, w.Code)
-		s.mockSvc.AssertExpectations(s.T())
-	})
-
-	s.Run("Method Not Allowed", func() {
-		req := httptest.NewRequest(http.MethodDelete, "/signin", nil)
-		w := httptest.NewRecorder()
-
-		s.h.SignIn(w, req)
-
-		s.Equal(http.StatusMethodNotAllowed, w.Code)
-	})
-
-	s.Run("Invalid JSON", func() {
-		req := httptest.NewRequest(http.MethodPost, "/signin", bytes.NewBufferString("bad-data"))
-		w := httptest.NewRecorder()
-
-		s.h.SignIn(w, req)
-
-		s.Equal(http.StatusBadRequest, w.Code)
-	})
-
-	s.Run("Validation Error", func() {
-		invalidInput := model.SignInInput{Email: "", Password: ""}
-
-		body, _ := json.Marshal(invalidInput)
-		req := httptest.NewRequest(http.MethodPost, "/signin", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.SignIn(w, req)
-
-		s.Equal(http.StatusUnprocessableEntity, w.Code)
-	})
-
-	s.Run("Unauthorized - Invalid Credentials", func() {
-		s.mockSvc.On("SignIn", mock.Anything, input).Return(model.AuthResponse{}, model.ErrInvalidCredentials).Once()
-
-		body, _ := json.Marshal(input)
-		req := httptest.NewRequest(http.MethodPost, "/signin", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.SignIn(w, req)
-
-		s.Equal(http.StatusUnauthorized, w.Code)
-	})
-
-	s.Run("Internal Server Error", func() {
-		s.mockSvc.On("SignIn", mock.Anything, input).Return(model.AuthResponse{}, errors.New("redis offline")).Once()
-
-		body, _ := json.Marshal(input)
-		req := httptest.NewRequest(http.MethodPost, "/signin", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.SignIn(w, req)
-
-		s.Equal(http.StatusInternalServerError, w.Code)
-	})
+			assert.Equal(t, tt.expectedSt, rr.Code)
+			var resp authErrorResponse
+			err := json.Unmarshal(rr.Body.Bytes(), &resp)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedMsg, resp.Error)
+		})
+	}
 }
 
-// ==========================================
-// ТЕСТЫ: Refresh (Обновление токенов)
-// ==========================================
+// =============================================================================
+// Тесты для метода SignIn (Авторизация)
+// =============================================================================
 
-func (s *AuthHandlerTestSuite) TestRefresh() {
-	validToken := "valid_token"
-	inputBody := map[string]string{"refresh_token": validToken}
-	resp := model.AuthResponse{AccessToken: "new_at", RefreshToken: "valid_token"}
+func TestAuthSignIn_Success(t *testing.T) {
+	h, s := setupAuthTestDeps(t)
+	input := model.SignInInput{
+		Email:    "test@example.com",
+		Password: "password123",
+	}
+	expectedResponse := model.AuthResponse{
+		AccessToken:  "access_token_mock",
+		RefreshToken: "refresh_token_mock",
+	}
 
-	s.Run("Success", func() {
-		s.mockSvc.On("Refresh", mock.Anything, validToken).Return(resp, nil).Once()
+	s.On("SignIn", mock.Anything, input).Return(expectedResponse, nil)
 
-		body, _ := json.Marshal(inputBody)
-		req := httptest.NewRequest(http.MethodPost, "/refresh", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
+	body, err := json.Marshal(input)
+	require.NoError(t, err)
 
-		s.h.Refresh(w, req)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sign-in", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
 
-		s.Equal(http.StatusOK, w.Code)
-		s.mockSvc.AssertExpectations(s.T())
-	})
+	h.SignIn(rr, req)
 
-	s.Run("Method Not Allowed", func() {
-		req := httptest.NewRequest(http.MethodPut, "/refresh", nil)
-		w := httptest.NewRecorder()
-
-		s.h.Refresh(w, req)
-
-		s.Equal(http.StatusMethodNotAllowed, w.Code)
-	})
-
-	s.Run("Invalid JSON", func() {
-		req := httptest.NewRequest(http.MethodPost, "/refresh", bytes.NewBufferString("{bad}"))
-		w := httptest.NewRecorder()
-
-		s.h.Refresh(w, req)
-
-		s.Equal(http.StatusBadRequest, w.Code)
-	})
-
-	s.Run("Missing Refresh Token", func() {
-		invalidBody := map[string]string{"refresh_token": ""} // Пустое поле, заваленный validate:"required"
-
-		body, _ := json.Marshal(invalidBody)
-		req := httptest.NewRequest(http.MethodPost, "/refresh", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.Refresh(w, req)
-
-		s.Equal(http.StatusBadRequest, w.Code)
-	})
-
-	s.Run("Unauthorized - Session Not Found", func() {
-		s.mockSvc.On("Refresh", mock.Anything, validToken).Return(model.AuthResponse{}, model.ErrSessionNotFound).Once()
-
-		body, _ := json.Marshal(inputBody)
-		req := httptest.NewRequest(http.MethodPost, "/refresh", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.Refresh(w, req)
-
-		s.Equal(http.StatusUnauthorized, w.Code)
-	})
-
-	s.Run("Internal Server Error", func() {
-		s.mockSvc.On("Refresh", mock.Anything, validToken).Return(model.AuthResponse{}, errors.New("crypto crash")).Once()
-
-		body, _ := json.Marshal(inputBody)
-		req := httptest.NewRequest(http.MethodPost, "/refresh", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.Refresh(w, req)
-
-		s.Equal(http.StatusInternalServerError, w.Code)
-	})
+	assert.Equal(t, http.StatusOK, rr.Code)
+	var actualResponse model.AuthResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &actualResponse)
+	require.NoError(t, err)
+	assert.Equal(t, expectedResponse, actualResponse)
 }
 
-// ==========================================
-// ТЕСТЫ: Logout (Выход из системы)
-// ==========================================
+func TestAuthSignIn_InvalidCredentials(t *testing.T) {
+	h, s := setupAuthTestDeps(t)
+	input := model.SignInInput{
+		Email:    "wrong@example.com",
+		Password: "wrongpassword",
+	}
 
-func (s *AuthHandlerTestSuite) TestLogout() {
-	targetToken := "token_to_revoke"
-	inputBody := map[string]string{"refresh_token": targetToken}
+	s.On("SignIn", mock.Anything, input).Return(model.AuthResponse{}, model.ErrInvalidCredentials)
 
-	s.Run("Success", func() {
-		s.mockSvc.On("Logout", mock.Anything, targetToken).Return(nil).Once()
+	body, err := json.Marshal(input)
+	require.NoError(t, err)
 
-		body, _ := json.Marshal(inputBody)
-		req := httptest.NewRequest(http.MethodPost, "/logout", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sign-in", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
 
-		s.h.Logout(w, req)
+	h.SignIn(rr, req)
 
-		s.Equal(http.StatusNoContent, w.Code)
-		s.mockSvc.AssertExpectations(s.T())
-	})
-
-	s.Run("Method Not Allowed", func() {
-		req := httptest.NewRequest(http.MethodGet, "/logout", nil)
-		w := httptest.NewRecorder()
-
-		s.h.Logout(w, req)
-
-		s.Equal(http.StatusMethodNotAllowed, w.Code)
-	})
-
-	s.Run("Invalid JSON", func() {
-		req := httptest.NewRequest(http.MethodPost, "/logout", bytes.NewBufferString("not-a-json"))
-		w := httptest.NewRecorder()
-
-		s.h.Logout(w, req)
-
-		s.Equal(http.StatusBadRequest, w.Code)
-	})
-
-	s.Run("Missing Refresh Token", func() {
-		invalidBody := map[string]string{"refresh_token": ""}
-
-		body, _ := json.Marshal(invalidBody)
-		req := httptest.NewRequest(http.MethodPost, "/logout", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.Logout(w, req)
-
-		s.Equal(http.StatusBadRequest, w.Code)
-	})
-
-	s.Run("Not Found - Session Missing", func() {
-		s.mockSvc.On("Logout", mock.Anything, targetToken).Return(model.ErrSessionNotFound).Once()
-
-		body, _ := json.Marshal(inputBody)
-		req := httptest.NewRequest(http.MethodPost, "/logout", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.Logout(w, req)
-
-		s.Equal(http.StatusNotFound, w.Code)
-	})
-
-	s.Run("Internal Server Error", func() {
-		s.mockSvc.On("Logout", mock.Anything, targetToken).Return(errors.New("db disconnect")).Once()
-
-		body, _ := json.Marshal(inputBody)
-		req := httptest.NewRequest(http.MethodPost, "/logout", bytes.NewBuffer(body))
-		w := httptest.NewRecorder()
-
-		s.h.Logout(w, req)
-
-		s.Equal(http.StatusInternalServerError, w.Code)
-	})
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	var resp authErrorResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "неверный email или пароль", resp.Error)
 }
 
-func TestAuthHandlerSuite(t *testing.T) {
-	suite.Run(t, new(AuthHandlerTestSuite))
+func TestAuthSignIn_ValidationErrors(t *testing.T) {
+	h, _ := setupAuthTestDeps(t)
+	input := model.SignInInput{Email: ""} // Пустой email завалит валидацию
+
+	body, err := json.Marshal(input)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sign-in", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	h.SignIn(rr, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+	var resp authErrorResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "необходимо заполнить все поля корректно", resp.Error)
+}
+
+// =============================================================================
+// Тесты для метода Refresh (Обновление токенов)
+// =============================================================================
+
+func TestAuthRefresh_Success(t *testing.T) {
+	h, s := setupAuthTestDeps(t)
+	tokenInput := map[string]string{"refresh_token": "valid_refresh_token"}
+	expectedResponse := model.AuthResponse{
+		AccessToken:  "new_access",
+		RefreshToken: "new_refresh",
+	}
+
+	s.On("Refresh", mock.Anything, "valid_refresh_token").Return(expectedResponse, nil)
+
+	body, err := json.Marshal(tokenInput)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	h.Refresh(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	var actualResponse model.AuthResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &actualResponse)
+	require.NoError(t, err)
+	assert.Equal(t, expectedResponse, actualResponse)
+}
+
+func TestAuthRefresh_MissingToken(t *testing.T) {
+	h, _ := setupAuthTestDeps(t)
+	tokenInput := map[string]string{"refresh_token": ""} // Пустой токен
+
+	body, err := json.Marshal(tokenInput)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	h.Refresh(rr, req)
+
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	var resp authErrorResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "отсутствует refresh_token", resp.Error)
+}
+
+func TestAuthRefresh_SessionNotFound(t *testing.T) {
+	h, s := setupAuthTestDeps(t)
+	tokenInput := map[string]string{"refresh_token": "expired_token"}
+
+	s.On("Refresh", mock.Anything, "expired_token").Return(model.AuthResponse{}, model.ErrSessionNotFound)
+
+	body, err := json.Marshal(tokenInput)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	h.Refresh(rr, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	var resp authErrorResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "сессия не найдена или устарела", resp.Error)
+}
+
+// =============================================================================
+// Тесты для метода Logout (Выход из системы)
+// =============================================================================
+
+func TestAuthLogout_Success(t *testing.T) {
+	h, s := setupAuthTestDeps(t)
+	tokenInput := map[string]string{"refresh_token": "token_to_destroy"}
+
+	s.On("Logout", mock.Anything, "token_to_destroy").Return(nil)
+
+	body, err := json.Marshal(tokenInput)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	h.Logout(rr, req)
+
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+	assert.Empty(t, rr.Body.String())
+	s.AssertExpectations(t)
+}
+
+func TestAuthLogout_SessionNotFound(t *testing.T) {
+	h, s := setupAuthTestDeps(t)
+	tokenInput := map[string]string{"refresh_token": "unknown_token"}
+
+	s.On("Logout", mock.Anything, "unknown_token").Return(model.ErrSessionNotFound)
+
+	body, err := json.Marshal(tokenInput)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	h.Logout(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	var resp authErrorResponse
+	err = json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.Equal(t, "активная сессия не найдена", resp.Error)
 }

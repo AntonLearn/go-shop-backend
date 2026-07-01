@@ -1,7 +1,6 @@
-// Package handler реализует транспортный слой приложения (HTTP).
-// Файл helpers_test.go тестирует низкоуровневые системные утилиты пакета:
-// безопасную потокозащищенную работу с контекстом и унифицированный вывод ответов.
-package handler
+// Package handler_test содержит модульные тесты для проверки утилит работы
+// с контекстом пользователя и единых хелперов ответа транспортного слоя.
+package handler_test
 
 import (
 	"context"
@@ -10,125 +9,163 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/antonlearn/go-shop-backend/pkg/logger"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/antonlearn/go-shop-backend/internal/handler"
+	"github.com/antonlearn/go-shop-backend/pkg/logger"
 )
 
-// TestContextHelpers проверяет атомарные операции записи и чтения
-// контекста для предотвращения коллизий типов ключей.
+// TestContextHelpers верифицирует корректность добавления и безопасного
+// извлечения доменных данных пользователя (ID, роль, Email) из context.Context.
 func TestContextHelpers(t *testing.T) {
-	baseCtx := context.Background()
+	t.Run("Успешная запись и чтение UserID", func(t *testing.T) {
+		// Arrange
+		expectedID := 123
+		ctx := context.Background()
 
-	t.Run("User ID Context Operations", func(t *testing.T) {
-		// 1. Записываем ID пользователя в контекст через хелпер
-		ctx := ContextWithUserID(baseCtx, 42)
+		// Act
+		ctx = handler.ContextWithUserID(ctx, expectedID)
+		actualID, ok := handler.GetUserID(ctx)
 
-		// 2. Извлекаем данные обратно
-		id, ok := GetUserID(ctx)
-
-		// 3. Проверяем результат
-		assert.True(t, ok, "ID должен успешно извлекаться")
-		assert.Equal(t, 42, id)
+		// Assert
+		assert.True(t, ok)
+		assert.Equal(t, expectedID, actualID)
 	})
 
-	t.Run("User Role Context Operations", func(t *testing.T) {
-		// 1. Записываем роль в контекст
-		ctx := ContextWithUserRole(baseCtx, "admin")
+	t.Run("UserID отсутствует в контексте", func(t *testing.T) {
+		// Arrange & Act
+		actualID, ok := handler.GetUserID(context.Background())
 
-		// 2. Извлекаем роль обратно
-		role, ok := GetUserRole(ctx)
-
-		// 3. Проверяем результат
-		assert.True(t, ok, "Роль должна успешно извлекаться")
-		assert.Equal(t, "admin", role)
+		// Assert
+		assert.False(t, ok)
+		assert.Zero(t, actualID)
 	})
 
-	t.Run("User Email Context Operations", func(t *testing.T) {
-		// 1. Записываем email в контекст
-		ctx := ContextWithUserEmail(baseCtx, "developer@shop.com")
+	t.Run("Успешная запись и чтение UserRole", func(t *testing.T) {
+		// Arrange
+		expectedRole := "admin"
+		ctx := context.Background()
 
-		// 2. Извлекаем email обратно
-		email, ok := GetUserEmail(ctx)
+		// Act
+		ctx = handler.ContextWithUserRole(ctx, expectedRole)
+		actualRole, ok := handler.GetUserRole(ctx)
 
-		// 3. Проверяем результат
-		assert.True(t, ok, "Email должен успешно извлекаться")
-		assert.Equal(t, "developer@shop.com", email)
+		// Assert
+		assert.True(t, ok)
+		assert.Equal(t, expectedRole, actualRole)
 	})
 
-	t.Run("Missing Values In Context", func(t *testing.T) {
-		// Проверяем защитное поведение хелперов при отсутствии данных
-		emptyCtx := context.Background()
+	t.Run("UserRole отсутствует в контексте", func(t *testing.T) {
+		// Arrange & Act
+		actualRole, ok := handler.GetUserRole(context.Background())
 
-		id, okID := GetUserID(emptyCtx)
-		role, okRole := GetUserRole(emptyCtx)
-		email, okEmail := GetUserEmail(emptyCtx)
+		// Assert
+		assert.False(t, ok)
+		assert.Empty(t, actualRole)
+	})
 
-		// Проверяем, что хелперы не падают в nil-pointer panic, а возвращают дефолты
-		assert.False(t, okID)
-		assert.Zero(t, id)
+	t.Run("Успешная запись и чтение UserEmail", func(t *testing.T) {
+		// Arrange
+		expectedEmail := "test@example.com"
+		ctx := context.Background()
 
-		assert.False(t, okRole)
-		assert.Empty(t, role)
+		// Act
+		ctx = handler.ContextWithUserEmail(ctx, expectedEmail)
+		actualEmail, ok := handler.GetUserEmail(ctx)
 
-		assert.False(t, okEmail)
-		assert.Empty(t, email)
+		// Assert
+		assert.True(t, ok)
+		assert.Equal(t, expectedEmail, actualEmail)
+	})
+
+	t.Run("UserEmail отсутствует в контексте", func(t *testing.T) {
+		// Arrange & Act
+		actualEmail, ok := handler.GetUserEmail(context.Background())
+
+		// Assert
+		assert.False(t, ok)
+		assert.Empty(t, actualEmail)
 	})
 }
 
-// TestResponseHelpers проверяет корректность работы функций форматирования вывода в HTTP-транспорт.
-func TestResponseHelpers(t *testing.T) {
-	log, _ := logger.New("Console", "INFO")
+// TestRespondWithJSON_Success проверяет штатное поведение хелпера ответов:
+// установку заголовков, HTTP-статуса и корректную маршализацию переданных данных.
+func TestRespondWithJSON_Success(t *testing.T) {
+	// Arrange
+	log, err := logger.New("local", "Stdout")
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	ctx := context.Background()
+	status := http.StatusAccepted
+
+	type testData struct {
+		Foo string `json:"foo"`
+		Bar int    `json:"bar"`
+	}
+	payload := testData{Foo: "baz", Bar: 42}
+
+	// Act
+	handler.RespondWithJSON(rr, ctx, log, status, payload)
+
+	// Assert
+	assert.Equal(t, status, rr.Code)
+	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+
+	var actualPayload testData
+	err = json.Unmarshal(rr.Body.Bytes(), &actualPayload)
+	require.NoError(t, err)
+	assert.Equal(t, payload, actualPayload)
+}
+
+// TestRespondWithError проверяет стандартизированный формат тела JSON-ответа
+// в случае возникновения ошибок на транспортном уровне.
+func TestRespondWithError(t *testing.T) {
+	// Arrange
+	log, err := logger.New("local", "Stdout")
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	ctx := context.Background()
+	status := http.StatusBadRequest
+	errorMessage := "некорректный формат входных данных"
+
+	// Act
+	handler.RespondWithError(rr, ctx, log, status, errorMessage)
+
+	// Assert
+	assert.Equal(t, status, rr.Code)
+	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+
+	var actualResponse map[string]string
+	err = json.Unmarshal(rr.Body.Bytes(), &actualResponse)
+	require.NoError(t, err)
+
+	assert.Contains(t, actualResponse, "error")
+	assert.Equal(t, errorMessage, actualResponse["error"])
+}
+
+// TestRespondWithJSON_SerializationError проверяет устойчивость функции хелпера
+// к критическим сбоям сериализации JSON (например, при передаче несериализуемых типов данных).
+func TestRespondWithJSON_SerializationError(t *testing.T) {
+	// Arrange
+	log, err := logger.New("local", "Stdout")
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
 	ctx := context.Background()
 
-	t.Run("Success respondWithJSON", func(t *testing.T) {
-		// Инициализируем инструмент записи ответа (Recorder)
-		rr := httptest.NewRecorder()
-		testData := map[string]int{"product_id": 99, "quantity": 5}
+	// Передаем канал (chan), который принципиально невозможно упаковать в JSON
+	unsupportedPayload := make(chan int)
 
-		// Вызываем пакетный JSON-хелпер
-		respondWithJSON(rr, ctx, log, http.StatusAccepted, testData)
+	// Act
+	handler.RespondWithJSON(rr, ctx, log, http.StatusOK, unsupportedPayload)
 
-		// Проверяем статус, заголовки и валидность сериализованного JSON
-		assert.Equal(t, http.StatusAccepted, rr.Code)
-		assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
-
-		var actualBody map[string]int
-		err := json.Unmarshal(rr.Body.Bytes(), &actualBody)
-
-		assert.NoError(t, err, "Тело ответа должно быть валидным JSON")
-		assert.Equal(t, 99, actualBody["product_id"])
-		assert.Equal(t, 5, actualBody["quantity"])
-	})
-
-	t.Run("Error respondWithError", func(t *testing.T) {
-		rr := httptest.NewRecorder()
-		expectedErrorMessage := "неверный формат входных данных DTO"
-
-		// Вызываем хелпер стандартизированной ошибки
-		respondWithError(rr, ctx, log, http.StatusBadRequest, expectedErrorMessage)
-
-		// Проверяем соответствие контракту ошибок {"error": "сообщение"}
-		assert.Equal(t, http.StatusBadRequest, rr.Code)
-		assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
-
-		var errorResponse map[string]string
-		err := json.Unmarshal(rr.Body.Bytes(), &errorResponse)
-
-		assert.NoError(t, err)
-		assert.Contains(t, errorResponse, "error")
-		assert.Equal(t, expectedErrorMessage, errorResponse["error"])
-	})
-
-	t.Run("JSON Serialization Failure", func(t *testing.T) {
-		rr := httptest.NewRecorder()
-
-		// Каналы (chan) невозможно сериализовать в JSON.
-		// Передача такого объекта гарантированно вызовет ошибку внутри json.NewEncoder.Encode()
-		unserializableData := make(chan int)
-
-		// Проверяем, что хелпер обрабатывает ошибку внутри и не падает в панику
-		assert.NotPanics(t, func() {
-			respondWithJSON(rr, ctx, log, http.StatusOK, unserializableData)
-		})
-	})
+	// Assert
+	// Хелпер успевает вызвать WriteHeader до ошибки кодирования, поэтому статус проставится
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	// Проверяем, что тело ответа осталось пустым или неполным, а приложение не упало в panic
+	assert.Empty(t, rr.Body.String())
 }
